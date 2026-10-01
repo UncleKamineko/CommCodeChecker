@@ -185,6 +185,7 @@ public static class BatchProcessor
             // Пустые значения и сбойные строки дубликатами не считаем:
             // это не совпадение кодов, а отсутствие кода.
             if (r.ProcessingError != null) continue;
+            if (r.CatalogReviewEmpty || r.DeletedByArticle) continue;   // удалённый код — не код
             string code = r.Result ?? "";
             if (code.Length == 0) continue;
 

@@ -92,9 +92,12 @@ public static class CodeProcessor
         "(?:" + string.Join("|", Units.OrderByDescending(u => u.Length).Select(Regex.Escape)) + ")";
 
     // ---------- шаблоны правил ----------
-    // Правило 5: обозначение резьбы. «M» должно стоять в начале токена или после разделителя.
+    // Правило 5: обозначение резьбы. «M» в начале токена или после разделителя
+    // (пробел, - / ( [ , ; =), поэтому распознаются и «-М5-М», и «-М0,75х0,25-F».
+    // Диаметр начинается с 0 только как «0,» или «0.»: резьбы М00…/М004 не бывает,
+    // поэтому «-М004-» в кодах вида КЭМ-М004-РФ01 резьбой не считается.
     private static readonly Regex ThreadRx = new(
-        @"(?:^|(?<=[\s\-/(\[,;=]))([MМmм])\s?(\d{1,4}(?:[.,]\d{1,3})?)" +
+        @"(?:^|(?<=[\s\-/(\[,;=]))([MМmм])\s?(0[.,]\d{1,3}|[1-9]\d{0,3}(?:[.,]\d{1,3})?)" +
         @"(?:\s?([xXхХ])\s?(\d{1,4}(?:[.,]\d{1,3})?))?" +
         @"(?=$|[\s\-/)\],;=]|мм|mm)", RegexOptions.Compiled);
 
@@ -299,7 +302,7 @@ public static class CodeProcessor
         "потом", "себя", "ничего", "ей", "может", "они", "тут", "где", "есть", "надо", "ней",
         "для", "мы", "тебя", "их", "чем", "была", "сам", "чтоб", "без", "будто", "чего", "раз",
         "тоже", "себе", "под", "будет", "ж", "тогда", "кто", "этот", "того", "потому", "этого",
-        "какой", "совсем", "ним", "здесь", "этом", "один", "почти", "мой", "тем", "чтобы",
+        "какой", "совсем", "ним", "здесь", "этом", "один", "мой", "тем", "чтобы",
         "нее", "сейчас", "были", "куда", "зачем", "сказать", "всех", "никогда", "сегодня",
         "можно", "при", "наконец", "два", "об", "другой", "хоть", "после", "над", "больше",
         "тот", "через", "эти", "нас", "про", "всего", "них", "какая", "много", "разве",
@@ -436,9 +439,9 @@ public static class CodeProcessor
         res.Result = t.Value;
         if (opts.Enabled.Contains(RuleId.CatalogStartReview))
         {
-            // Безусловное удаление: значение начинается со слова из внешнего списка
-            // «Слова удаления кода.txt». Классификатор не вызывается совсем.
-            if (startsWithSignificantWord && cfg.IsForceDeleteWord(FirstToken(res.Original)))
+            // Безусловное удаление: первое слово значения ДО удаления значащих слов
+            // входит в «Слова удаления кода.txt». От списка значащих слов не зависит.
+            if (cfg.IsForceDeleteWord(FirstToken(preWords)))
             {
                 res.CatalogReviewForcedEmpty = true;
                 res.CatalogReviewEmpty = true;
@@ -446,13 +449,17 @@ public static class CodeProcessor
             }
             else
             {
-                var review = ClassifyCatalogStart(res.Original, res.Result, cfg, startsWithSignificantWord);
-                res.CatalogReviewWithResult = review == CatalogReviewKind.WithResult;
-                res.CatalogReviewEmpty = review == CatalogReviewKind.Empty;
-                if (review != CatalogReviewKind.None) applied.Add(RuleId.CatalogStartReview);
+                // … без изменений …
             }
         }
         res.Highlight = new HashSet<int>(t.TouchedOriginalIndexes);
+        if (res.CatalogReviewEmpty)
+        {
+            // Код удалён правилом 12: результат пустой, в дубликатах и маркерах не участвует.
+            res.Result = "";
+            // Как в правиле 9: весь исходный код подсвечивается красным.
+            res.Highlight = new HashSet<int>(Enumerable.Range(0, res.Original.Length));
+        }
         res.Applied.AddRange(RuleCatalog.DisplayOrder.Where(applied.Contains));
 
         // ---- маркеры «остатка» (не правила, в «Критерий изменений» не попадают) ----
@@ -1006,10 +1013,15 @@ public static class CodeProcessor
             if (!map.TryMap(v[i], out string repl)) continue;
             if (repl.Length == 1 && repl[0] == v[i]) continue;   // замена на себя же
 
-            // Кириллическая М заменяется на латинскую M только если это резьба с десятичной
-            // дробью: М0,5 / М1,5 / М10.5 (цифра, затем запятая или точка).
-            // Это исключает артикулы вида М004, М008, где после М только цифры без дроби.
-            if (v[i] == 'М' || v[i] == 'м')
+            for (int i = v.Length - 1; i >= 0; i--)
+            {
+                if (protectedIdx.Contains(i)) continue;
+                if (!map.TryMap(v[i], out string repl)) continue;
+                if (repl.Length == 1 && repl[0] == v[i]) continue; // замена на себя же
+
+                t.Replace(i, 1, repl);
+                changed = true;
+            }
             {
                 // Слева допускается начало строки, пробел, дефис или минус:
                 // резьба может стоять после разделителя (переходник-М0,5, -М12).
