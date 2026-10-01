@@ -1,0 +1,27 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<OutputType>WinExe</OutputType>
+		<TargetFramework>net8.0-windows</TargetFramework>
+		<UseWindowsForms>true</UseWindowsForms>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<LangVersion>latest</LangVersion>
+		<AssemblyName>CommCodeChecker</AssemblyName>
+		<RootNamespace>CommCodeChecker</RootNamespace>
+		<ApplicationDefaultFont>Segoe UI, 9pt</ApplicationDefaultFont>
+		<InvariantGlobalization>false</InvariantGlobalization>
+		<ApplicationIcon>Elegantthemes-Softies-Clipboard.ico</ApplicationIcon>
+	</PropertyGroup>
+	<ItemGroup>
+		<PackageReference Include="ClosedXML" Version="0.102.2" />
+		<PackageReference Include="System.Text.Encoding.CodePages" Version="8.0.0" />
+	</ItemGroup>
+	<ItemGroup>
+		<None Include="Файлы конфигурации\**"
+			  CopyToOutputDirectory="PreserveNewest"
+			  CopyToPublishDirectory="Never" />
+	</ItemGroup>
+	<ItemGroup>
+	  <Content Include="Elegantthemes-Softies-Clipboard.ico" />
+	</ItemGroup>
+</Project>
