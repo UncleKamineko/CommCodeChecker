@@ -312,7 +312,23 @@ public static class CodeProcessor
         "and", "with", "for", "of", "per", "the", "a", "an", "to", "in", "on", "by", "or",
         "from", "at", "as", "is", "are", "be", "no", "not"
     };
+    // ---------- правило 12: зависимая конструкция в родительном падеже ----------
+    // «Крышка насоса», «Ремкомплект распределителя», «Шток поршня»: позиция связана
+    // с другим изделием — код после такой конструкции относится к нему, а не к позиции.
 
+    /// Прилагательные в им. п. и жен. род. п. («-ой», «-ей» у «тонкой», «верхней»
+    /// не учитываются: «-ей» у существительных — род. п. мн. ч., см. NounGenitiveEndings).
+    private static readonly string[] AdjSkipEndings =
+        { "ого", "его", "ых", "их", "ый", "ий", "ой", "ая", "яя", "ое", "ее", "ые", "ие" };
+
+    /// Окончания существительных в род. п. ед. и мн. ч.
+    private static readonly string[] NounGenitiveEndings =
+        { "ов", "ев", "ёв", "ей", "а", "я", "ы", "и" };
+
+    private static readonly Regex CyrWordRx = new(
+        @"^[А-Яа-яЁё]+(?:-[А-Яа-яЁё]+)*$", RegexOptions.Compiled);
+
+    private const int GenitiveScanLimit = 4;
 
     private static readonly Regex CodeLikeRx = new(@"^[0-9A-Z][0-9A-Zx\-.,/°""']*$", RegexOptions.Compiled);
     private static readonly Regex SuspiciousRx = new(
@@ -545,8 +561,13 @@ public static class CodeProcessor
 
         string source = original.Trim();
         string rest = result.Trim();
-        if (CatalogMarkerRx.IsMatch(source) || HasPrepositionLink(source)) return
-            HasPrepositionLink(source) ? CatalogReviewKind.Empty : CatalogReviewKind.WithResult;
+
+        // Связь позиции с другим изделием — через предлог («Уплотнения для заслонки»)
+        // или через зависимое слово в род. п. («Крышка насоса»): код удаляется.
+        if (HasPrepositionLink(source) || HasGenitiveLink(source, cfg))
+            return CatalogReviewKind.Empty;
+        if (CatalogMarkerRx.IsMatch(source))
+            return CatalogReviewKind.WithResult;
 
         if (string.IsNullOrEmpty(rest)) return CatalogReviewKind.Empty;
         var tokens = TokenSpans(rest).Select(x => rest.Substring(x.start, x.len).Trim(EdgeTrim))
@@ -585,6 +606,40 @@ public static class CodeProcessor
     private static bool HasPrepositionLink(string value) =>
         Regex.IsMatch(value, @"(?:^|\s)(?:для|от|for|of|per|к|ко|с|со|на|в|во|из|по|with)\s+[A-ZА-ЯЁ0-9ØΦ]",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    /// <summary>
+    /// После первого (значащего) слова идёт зависимое существительное в род. п.:
+    /// «Крышка насоса», «Ремкомплект распределителя», «Комплект уплотнений клапана».
+    /// Прилагательные, отглагольные существительные (-ния/-тия) и слова из файла
+    /// «Исключения родительного падежа.txt» пропускаются; просмотр прекращается
+    /// на коде, союзе, аббревиатуре или после запятой (перечисление).
+    /// </summary>
+    private static bool HasGenitiveLink(string value, ConfigRepository cfg)
+    {
+        var spans = TokenSpans(value);
+        for (int k = 1; k < spans.Count && k <= GenitiveScanLimit; k++)
+        {
+            string prevRaw = value.Substring(spans[k - 1].start, spans[k - 1].len);
+            if (prevRaw.EndsWith(',') || prevRaw.EndsWith(';')) break;   // перечисление
+
+            string w = value.Substring(spans[k].start, spans[k].len).Trim(EdgeTrim);
+            if (!CyrWordRx.IsMatch(w)) break;                            // код, число, латиница
+            if (OrphanedWords.Contains(w)) break;                        // союз/служебное слово
+            if (w.Length <= 4 && w == w.ToUpperInvariant()) break;       // аббревиатура: ПВА, ФУМ
+
+            if (IsGenitiveDependentNoun(w.ToLowerInvariant(), cfg)) return true;
+        }
+        return false;
+    }
+
+    private static bool IsGenitiveDependentNoun(string w, ConfigRepository cfg)
+    {
+        if (w.Length < 4) return false;
+        if (cfg.IsGenitiveException(w)) return false;
+        if (AdjSkipEndings.Any(e => w.EndsWith(e, StringComparison.Ordinal))) return false;
+        if (w.EndsWith("ния", StringComparison.Ordinal) ||
+            w.EndsWith("тия", StringComparison.Ordinal)) return false;  // давления, крепления
+        return NounGenitiveEndings.Any(e => w.EndsWith(e, StringComparison.Ordinal));
+    }
 
     /// <summary>
     /// Начинается ли значение со значащего слова (по состоянию ДО правила 7).
