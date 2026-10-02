@@ -27,11 +27,19 @@ public sealed class AppSettings
     public MorphologyMode Morphology { get; set; } = MorphologyMode.Paradigms;
     /// <summary>Доп. символы, допустимые в «Коды для загрузки в 1С» (по ТЗ — пусто).</summary>
     public string Extra1CChars { get; set; } = "";
+
     /// <summary>
     /// Сочетания кириллицы, для которых правило 10 (замена гомоглифов) игнорируется.
     /// Значения разделяются запятой, например «ТВСР,КР,НН».
     /// </summary>
     public string CyrillicExceptions { get; set; } = "";
+
+    /// <summary>
+    /// Серии номенклатуры, для которых правило 8 не удаляет окончания,
+    /// технические блоки допустимы в форме «* *», классификатор правила 12 не применяется.
+    /// Разделитель — запятая, например «H74H,H75H».
+    /// </summary>
+    public string EndingKeepSeries { get; set; } = "";
     /// <summary>Правила проверки комм. кода для ИМ.</summary>
     public string? ImRulesFilePath { get; set; }
 
@@ -100,6 +108,7 @@ public sealed class AppSettings
     {
         Enabled = new HashSet<RuleId>(EnabledRules),
         Extra1CChars = Extra1CChars ?? "",
-        CyrillicExceptions = CyrillicExceptions ?? ""
+        CyrillicExceptions = CyrillicExceptions ?? "",
+        EndingKeepSeries = EndingKeepSeries ?? ""
     };
 }

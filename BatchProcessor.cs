@@ -14,7 +14,8 @@ public sealed class BatchReport
     public int CountUnchanged { get; set; }
     public int Failures { get; set; }
 
-    /// <summary>Строк с одинаковым комм. кодом при разных артикулах в файле для 1С.</summary>
+    /// Строк с одинаковым комм. кодом при разных артикулах среди кодов для 1С.
+    /// В файл для 1С они не попадают — только в «Дубликаты в кодах для переноса в 1С.xlsx».
     public int Duplicates1C { get; set; }
 
     /// <summary>То же для файла ручной проверки (по исправленному коду).</summary>
@@ -28,12 +29,11 @@ public sealed class BatchReport
         RuleCatalog.DisplayOrder.ToDictionary(r => r, _ => 0);
 
     /// <summary>Имена выходных файлов, в которых найдены дубликаты.</summary>
+    /// Имена выходных файлов, для которых найдены дубликаты.
     public IEnumerable<string> FilesWithDuplicates
     {
         get
         {
-            // Оповещение относится к основному файлу 1С: именно в нём
-            // дубликаты отмечены красным артикулом.
             if (Duplicates1C > 0) yield return BatchProcessor.File1C;
             if (DuplicatesManual > 0) yield return BatchProcessor.FileManual;
         }
@@ -50,7 +50,11 @@ public static class BatchProcessor
     public const string SrcHeaderCode = "Номенклатура.Коммерческий код (Общие)";
     public const string SrcHeaderGroup = "Номенклатура.Группа выгрузки ИМ (Общие)";
     public const string OutHeaderGroup = "Группа выгрузки ИМ";
-
+    /// Текст предупреждения о дубликатах — для вкладки и для файла сводки.
+    public static string DuplicateWarning(string file) => file == File1C
+        ? $"ВНИМАНИЕ!!! При формировании файла {File1C} обнаружены дубликаты комм. кодов " +
+          $"для разных артикулов, проверьте их в файле \"{FileDuplicates1C}\"!"
+        : $"ВНИМАНИЕ!!! В файле {file} обнаружены дубликаты комм. кодов для разных артикулов, проверьте!";
     private static readonly XLColor Yellow = XLColor.FromArgb(255, 255, 153);
     private static readonly XLColor Orange = XLColor.FromArgb(255, 204, 153);
     private static readonly XLColor Red = XLColor.FromArgb(255, 153, 153);
@@ -148,21 +152,28 @@ public static class BatchProcessor
                 progress.Report(rows.Count == 0 ? 100 : (i + 1) * 100 / rows.Count);
         }
 
-        report.Count1C = for1C.Count;
-        report.CountManual = manual.Count;
-        report.CountUnchanged = unchanged.Count;
-        report.Failures = failures;
-
         // Один и тот же комм. код у разных артикулов — ищем отдельно в каждом файле.
         var dup1C = FindCrossArticleDuplicates(for1C);
         var dupManual = FindCrossArticleDuplicates(manual);
-        report.Duplicates1C = dup1C.Count;
+
+        // Дубликаты в файл для 1С не включаются — только в файл дубликатов.
+        var duplicates1C = dup1C.OrderBy(i => i).Select(i => for1C[i]).ToList();
+        var clean1C = for1C.Where((_, i) => !dup1C.Contains(i)).ToList();
+
+        report.Count1C = clean1C.Count;
+        report.CountManual = manual.Count;
+        report.CountUnchanged = unchanged.Count;
+        report.Failures = failures;
+        report.Duplicates1C = duplicates1C.Count;
         report.DuplicatesManual = dupManual.Count;
 
-        WriteSimple(Path.Combine(report.OutputFolder, File1C), for1C, useResult: true, duplicates: dup1C);
-        WriteSimple(Path.Combine(report.OutputFolder, FileNoChange), unchanged, useResult: false, duplicates: null);
+        WriteSimple(Path.Combine(report.OutputFolder, File1C), clean1C, useResult: true);
+        WriteSimple(Path.Combine(report.OutputFolder, FileNoChange), unchanged, useResult: false);
         WriteManual(Path.Combine(report.OutputFolder, FileManual), manual, report, dupManual);
-        WriteDuplicates(Path.Combine(report.OutputFolder, FileDuplicates1C), for1C, dup1C);
+
+        // Файл дубликатов — только если найден хотя бы один дубликат.
+        if (duplicates1C.Count > 0)
+            WriteDuplicates(Path.Combine(report.OutputFolder, FileDuplicates1C), duplicates1C);
 
         try { ReportWriter.Save(report); }
         catch (Exception ex) { report.ReportWriteError = ex.Message; }
@@ -222,32 +233,21 @@ public static class BatchProcessor
     }
 
     // ---------------- простые файлы (2 столбца) ----------------
-    private static void WriteSimple(string path, List<ProcessResult> data,
-                                bool useResult, HashSet<int>? duplicates)
-
+    private static void WriteSimple(string path, List<ProcessResult> data, bool useResult)
     {
         using var wb = new XLWorkbook();
         var ws = wb.AddWorksheet("Данные");
         ws.Cell(1, 1).Value = "Артикул";
         ws.Cell(1, 2).Value = "Коммерческий код";
-        ws.Cell(1, 4).Value = OutHeaderGroup;          // 4-й столбец по ТЗ
+        ws.Cell(1, 4).Value = OutHeaderGroup;   // 4-й столбец по ТЗ
         ws.Row(1).Style.Font.Bold = true;
         ws.Columns(1, 4).Style.NumberFormat.Format = "@";
 
         for (int i = 0; i < data.Count; i++)
         {
-            var cellArticle = ws.Cell(i + 2, 1);
-            cellArticle.Value = data[i].Article;
+            ws.Cell(i + 2, 1).Value = data[i].Article;
             ws.Cell(i + 2, 2).Value = useResult ? data[i].Result : data[i].Original;
             ws.Cell(i + 2, 4).Value = data[i].Group;
-
-            // В основном файле для 1С сохраняем прежнюю маркировку дубликатов:
-            // артикул выделяется красным полужирным шрифтом.
-            if (duplicates?.Contains(i) == true)
-            {
-                cellArticle.Style.Font.FontColor = XLColor.Red;
-                cellArticle.Style.Font.Bold = true;
-            }
         }
 
         int lastRow = Math.Max(1, data.Count + 1);
@@ -260,7 +260,8 @@ public static class BatchProcessor
         wb.SaveAs(path);
     }
 
-    private static void WriteDuplicates(string path, List<ProcessResult> data, HashSet<int> duplicates)
+    // ---------------- файл дубликатов (только дубликаты, без выделения) ----------------
+    private static void WriteDuplicates(string path, List<ProcessResult> data)
     {
         using var wb = new XLWorkbook();
         var ws = wb.AddWorksheet("Дубликаты");
@@ -268,14 +269,14 @@ public static class BatchProcessor
         ws.Cell(1, 2).Value = "Коммерческий код";
         ws.Row(1).Style.Font.Bold = true;
         ws.Columns(1, 2).Style.NumberFormat.Format = "@";
-        int row = 2;
-        foreach (int i in duplicates.OrderBy(x => x))
+
+        for (int i = 0; i < data.Count; i++)
         {
-            ws.Cell(row, 1).Value = data[i].Article;
-            ws.Cell(row, 2).Value = data[i].Result;
-            row++;
+            ws.Cell(i + 2, 1).Value = data[i].Article;
+            ws.Cell(i + 2, 2).Value = data[i].Result;
         }
-        int last = Math.Max(1, row - 1);
+
+        int last = Math.Max(1, data.Count + 1);
         ws.Range(1, 1, last, 2).Style.Alignment.WrapText = true;
         ws.Range(1, 1, last, 2).SetAutoFilter();
         ws.SheetView.FreezeRows(1);
@@ -388,7 +389,7 @@ public static class BatchProcessor
         Legend(Blue, "Синяя заливка", "Правило «Удаление значащих слов» удалило слово, стоявшее в начале исходного значения — проверьте, не является ли оно частью кода");
         Legend(Violet, "Сиреневая заливка", "Сбой обработки строки: значение оставлено без изменений, текст ошибки в столбце «Критерий изменений»");
         Legend(null, "Красный шрифт в «Коммерческий код»", "Символы, к которым были применены правила", redFont: true);
-        Legend(null, "Красный шрифт в «Артикул»", "Исправленный комм. код совпадает с кодом другого артикула — требуется проверка", redFont: true);
+        Legend(null, "Красный шрифт в «Артикул»", "Исправленный комм. код совпадает с кодом другого артикула в этом файле — требуется проверка", redFont: true);
 
         r += 1;
         ws.Cell(r, 1).Value = "СВОДНАЯ ТАБЛИЦА";
@@ -415,7 +416,7 @@ public static class BatchProcessor
 
         if (report.Duplicates1C > 0 || report.DuplicatesManual > 0)
         {
-            ws.Cell(r, 1).Value = "Дубликатов кода (файл для 1С)";
+            ws.Cell(r, 1).Value = "Дубликатов кода (исключены из файла для 1С)";
             ws.Cell(r, 2).Value = report.Duplicates1C;
             ws.Row(r).Style.Font.FontColor = XLColor.Red;
             ws.Row(r).Style.Font.Bold = true;

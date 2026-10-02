@@ -19,6 +19,12 @@ public sealed class ProcessOptions
     /// Символы внутри совпавшего подстроки не заменяются.
     /// </summary>
     public string CyrillicExceptions { get; init; } = "";
+    /// <summary>
+    /// Серии номенклатуры (начало кода), для которых правило 8 не применяется,
+    /// технические блоки не препятствуют форме «* *», а классификатор правила 12
+    /// не используется. Разделитель — запятая. Пример: «H74H» сохраняет код H74H-16P DN50.
+    /// </summary>
+    public string EndingKeepSeries { get; init; } = "";
     public bool AllowEmptyingByEnding { get; init; } = true;
     /// <summary>
     /// Правило 8 удаляет окончание только если оно было окончанием значения
@@ -56,7 +62,12 @@ public sealed class ProcessResult
     /// безусловного удаления — код удаляется целиком, минуя классификатор.
     /// </summary>
     public bool CatalogReviewForcedEmpty { get; set; }
-
+    /// <summary>
+    /// Код начинается с серии из «Серии, для которых не удаляем окончания»:
+    /// правило 8 не применялось, технические блоки (DN50, PN16, M6…) не препятствуют
+    /// форме «* *», классификатор правила 12 не применялся.
+    /// </summary>
+    public bool KeepSeries { get; set; }
     /// <summary>Текст исключения, если обработка строки сорвалась. null — обработка прошла.</summary>
     public string? ProcessingError { get; set; }
 
@@ -329,7 +340,14 @@ public static class CodeProcessor
         @"^[А-Яа-яЁё]+(?:-[А-Яа-яЁё]+)*$", RegexOptions.Compiled);
 
     private const int GenitiveScanLimit = 4;
-
+        /// Слова-«наборы»: следующее за ними слово — содержимое набора
+    /// («Комплект прокладок», «Набор ключей»), а не связь с другим изделием.
+    /// Ремкомплект сюда не входит: «Ремкомплект распределителя» — связь с изделием.
+    private static readonly HashSet<string> CollectiveHeads = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "комплект", "комплекты", "набор", "наборы",
+        "упаковка", "упаковки", "пачка", "пачки", "партия"
+    };
     private static readonly Regex CodeLikeRx = new(@"^[0-9A-Z][0-9A-Zx\-.,/°""']*$", RegexOptions.Compiled);
     private static readonly Regex SuspiciousRx = new(
         @"(\b(DIN|ISO|GOST|ANSI|JIS|EN)\s?\d)|(\bГОСТ)|(\bDN\s?\d)|(\bДу\s?\d)|(^|\s)M\d+X\d|" +
@@ -388,11 +406,14 @@ public static class CodeProcessor
     /// Значение имеет вид «* *» и ни один из блоков не является техническим
     /// обозначением. Состав допустимых символов зависит от настройки
     /// «Доп. символы, допустимые в файле для 1С».
+    /// allowTechnicalBlocks = true — для кодов из списка серий
+    /// («H74H-16P DN50»): технические блоки не препятствуют форме «* *».
     /// </summary>
-    private static bool IsAcceptableTwoBlock(string value, string? extra)
+    private static bool IsAcceptableTwoBlock(string value, string? extra, bool allowTechnicalBlocks = false)
     {
         var m = GetTwoBlockRx(extra).Match(value);
         if (!m.Success) return false;
+        if (allowTechnicalBlocks) return true;
 
         return !NonCodeBlockRx.IsMatch(m.Groups[1].Value)
             && !NonCodeBlockRx.IsMatch(m.Groups[2].Value);
@@ -444,7 +465,10 @@ public static class CodeProcessor
             // Убираем «осиротевшие» служебные слова (предлоги, союзы), оставшиеся после удаления значащих.
             RemoveOrphanedWords(t);
         }
-        if (opts.Enabled.Contains(RuleId.TrailingEnding) && ApplyEndings(t, cfg, opts, preWords)) applied.Add(RuleId.TrailingEnding);
+        // Серия из списка — окончания не удаляем (проверка до правила 8, после правил 3,6,2,5,4,1,7).
+        res.KeepSeries = StartsWithKeepSeries(t.Value, opts.EndingKeepSeries, cfg.CharMap);
+        if (opts.Enabled.Contains(RuleId.TrailingEnding) && !res.KeepSeries &&
+            ApplyEndings(t, cfg, opts, preWords)) applied.Add(RuleId.TrailingEnding);
         if (opts.Enabled.Contains(RuleId.HomoglyphLetters) && ApplyHomoglyphs(t, cfg.CharMap, opts.CyrillicExceptions ?? "")) applied.Add(RuleId.HomoglyphLetters);
         if (opts.Enabled.Contains(RuleId.TrimSpaces) && ApplySpaces(t)) applied.Add(RuleId.TrimSpaces);
 
@@ -465,7 +489,8 @@ public static class CodeProcessor
             }
             else
             {
-                var review = ClassifyCatalogStart(res.Original, res.Result, cfg, startsWithSignificantWord);
+                var review = ClassifyCatalogStart(res.Original, res.Result, cfg,
+                    startsWithSignificantWord, res.KeepSeries);
                 res.CatalogReviewWithResult = review == CatalogReviewKind.WithResult;
                 res.CatalogReviewEmpty = review == CatalogReviewKind.Empty;
                 if (review != CatalogReviewKind.None) applied.Add(RuleId.CatalogStartReview);
@@ -494,22 +519,23 @@ public static class CodeProcessor
         // Достоверная форма «* *» больше не повод считать результат подозрительным.
         // Форма, отвергнутая из-за технического обозначения в блоке, остаётся
         // подозрительной и получит оранжевую заливку в файле ручной проверки.
-        if (res.Result.Length > 0 && !IsAcceptableTwoBlock(res.Result, opts.Extra1CChars) &&
+        // Для кодов из списка серий технические блоки допустимы.
+        if (res.Result.Length > 0 && !IsAcceptableTwoBlock(res.Result, opts.Extra1CChars, res.KeepSeries) &&
             (SuspiciousRx.IsMatch(res.Result) || res.Result.Contains(' ')))
             res.Suspicious = true;
 
-        res.ReadyFor1C = IsReadyFor1C(res.Result, opts.Extra1CChars);
+        res.ReadyFor1C = IsReadyFor1C(res.Result, opts.Extra1CChars, res.KeepSeries);
         // Правило 12 всегда отправляет строку в ручную проверку.
         if (res.CatalogReviewWithResult || res.CatalogReviewEmpty) res.ReadyFor1C = false;
         return res;
     }
 
-    public static bool IsReadyFor1C(string value, string extra)
+    public static bool IsReadyFor1C(string value, string extra, bool keepSeries = false)
     {
         if (string.IsNullOrEmpty(value)) return false;
 
         // Форма «* *» проверяется ПЕРВОЙ: посимвольный цикл ниже отвергает пробел.
-        if (IsAcceptableTwoBlock(value, extra)) return true;
+        if (IsAcceptableTwoBlock(value, extra, keepSeries)) return true;
 
         foreach (char c in value)
         {
@@ -553,7 +579,8 @@ public static class CodeProcessor
     }
 
     private static CatalogReviewKind ClassifyCatalogStart(
-        string original, string result, ConfigRepository cfg, bool startsWithSignificantWord)
+        string original, string result, ConfigRepository cfg,
+        bool startsWithSignificantWord, bool keepSeries)
     {
         // Признак начала значащего слова получен ДО правила 7 (см. Process).
         // Повторно вычислять его по result нельзя: значащие слова уже удалены.
@@ -564,8 +591,13 @@ public static class CodeProcessor
 
         // Связь позиции с другим изделием — через предлог («Уплотнения для заслонки»)
         // или через зависимое слово в род. п. («Крышка насоса»): код удаляется.
+        // Действует и для кодов из списка серий.
         if (HasPrepositionLink(source) || HasGenitiveLink(source, cfg))
             return CatalogReviewKind.Empty;
+
+        // Код из списка серий («Клапан H74H-16P DN50»): классификатор не применяется.
+        if (keepSeries) return CatalogReviewKind.None;
+
         if (CatalogMarkerRx.IsMatch(source))
             return CatalogReviewKind.WithResult;
 
@@ -612,11 +644,19 @@ public static class CodeProcessor
     /// Прилагательные, отглагольные существительные (-ния/-тия) и слова из файла
     /// «Исключения родительного падежа.txt» пропускаются; просмотр прекращается
     /// на коде, союзе, аббревиатуре или после запятой (перечисление).
+    /// Если первое слово — набор («Комплект», «Набор»), следующее слово считается
+    /// содержимым набора и пропускается: «Комплект прокладок AB12» не удаляется.
     /// </summary>
     private static bool HasGenitiveLink(string value, ConfigRepository cfg)
     {
         var spans = TokenSpans(value);
-        for (int k = 1; k < spans.Count && k <= GenitiveScanLimit; k++)
+        if (spans.Count < 2) return false;
+
+        string head = value.Substring(spans[0].start, spans[0].len).Trim(EdgeTrim);
+        bool collective = CollectiveHeads.Contains(head);
+        int limit = GenitiveScanLimit + (collective ? 1 : 0);
+
+        for (int k = 1; k < spans.Count && k <= limit; k++)
         {
             string prevRaw = value.Substring(spans[k - 1].start, spans[k - 1].len);
             if (prevRaw.EndsWith(',') || prevRaw.EndsWith(';')) break;   // перечисление
@@ -626,12 +666,13 @@ public static class CodeProcessor
             if (OrphanedWords.Contains(w)) break;                        // союз/служебное слово
             if (w.Length <= 4 && w == w.ToUpperInvariant()) break;       // аббревиатура: ПВА, ФУМ
 
+            if (collective && k == 1) continue;                          // содержимое набора
+
             if (IsGenitiveDependentNoun(w.ToLowerInvariant(), cfg)) return true;
         }
         return false;
     }
-
-    private static bool IsGenitiveDependentNoun(string w, ConfigRepository cfg)
+        private static bool IsGenitiveDependentNoun(string w, ConfigRepository cfg)
     {
         if (w.Length < 4) return false;
         if (cfg.IsGenitiveException(w)) return false;
@@ -987,6 +1028,39 @@ public static class CodeProcessor
             }
         }
         return changed;
+    }
+
+    // ---------------- серии без удаления окончаний ----------------
+    /// <summary>
+    /// Код начинается с серии, для которой окончания не удаляются. Проверяется
+    /// значение на момент правила 8 (после правил 3, 6, 2, 5, 4, 1, 7). Правило 10
+    /// ещё не применено, поэтому сравнение — без учёта регистра и с приведением
+    /// похожих букв по карте замен: серия «H74H» совпадёт и с «Н74Н» на кириллице.
+    /// </summary>
+    private static bool StartsWithKeepSeries(string value, string? series, CharReplacements map)
+    {
+        if (string.IsNullOrWhiteSpace(series) || string.IsNullOrEmpty(value)) return false;
+
+        string v = NormalizeForSeries(value.TrimStart(), map);
+        foreach (var s in series.Split(new[] { ',', ';', '\r', '\n' },
+                     StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            string p = NormalizeForSeries(s, map);
+            if (p.Length > 0 && v.StartsWith(p, StringComparison.Ordinal)) return true;
+        }
+        return false;
+    }
+
+    private static string NormalizeForSeries(string s, CharReplacements map)
+    {
+        var sb = new StringBuilder(s.Length);
+        foreach (char c in s)
+        {
+            char u = char.ToUpperInvariant(c);
+            if (!map.IsEmpty && map.TryMap(u, out string r)) sb.Append(r);
+            else sb.Append(u);
+        }
+        return sb.ToString().ToUpperInvariant();
     }
 
     // ---------------- Правило 10 ----------------
