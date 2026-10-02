@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 
 namespace CommCodeChecker.Core;
 
@@ -7,6 +7,8 @@ namespace CommCodeChecker.Core;
 /// Набор 1 — правила 1–11, выполняется с выключенным правилом 12:
 ///           удаление кода правилом 12 скрыло бы результат проверяемых правил.
 /// Набор 2 — правило 12 (безусловное удаление и классификатор), выполняется с включённым правилом 12.
+/// Набор 3 — серии без удаления окончаний (серия «H74H», доп. символ «-», правило 12 включено);
+///           дополнительно проверяется готовность для 1С.
 /// Остальные настройки берутся из переданных опций. Списки слов, окончаний,
 /// исключений и карта замен читаются из файлов конфигурации.
 /// </summary>
@@ -100,7 +102,7 @@ public static class SelfTest
         ("R4", "Кольцо 66.04х5.33", ""),     // после значащего слова только размеры — код удаляется
         ("R5", "Кольцо SRF50-25267-0015 25x68", "SRF50-25267-0015"), // каталожный номер — результат остаётся
 
-                // Зависимое существительное в род. п. — связь с другим изделием, код удаляется.
+        // Зависимое существительное в род. п. — связь с другим изделием, код удаляется.
         ("G1", "Крышка насоса AB12-34", ""),
         ("G2", "Ремкомплект распределителя AB12-34", ""),
         ("G3", "Комплект уплотнений клапана AB12", ""),    // «уплотнений» пропускается, «клапана» — род. п.
@@ -111,9 +113,27 @@ public static class SelfTest
         ("G6", "Кран шаровой AB12-34", "AB12-34"),         // только прилагательное
         ("G7", "Фильтр тонкой очистки AB12-34", "тонкой очистки AB12-34"), // «очистки» — исключение
         ("G8", "Кольца, шайбы AB12", "AB12"),              // перечисление через запятую
-                // Конструкции состава: содержимое набора — не связь с другим изделием.
+
+        // Конструкции состава: содержимое набора — не связь с другим изделием.
         ("G9",  "Комплект прокладок AB12", "прокладок AB12"),
         ("G10", "Комплект ключей AB12", "ключей AB12"),    // «-ей» без пропуска дало бы род. п.
+    };
+
+    // ---------------------------------------------------------------------
+    // Набор 3: серии без удаления окончаний (серия «H74H», доп. символ «-», правило 12 включено)
+    // ready — ожидаемая готовность для 1С (ReadyFor1C).
+    // ---------------------------------------------------------------------
+    private const string KeepSeriesTest = "H74H";
+    private const string KeepSeriesExtra = "-";
+
+    private static readonly (string article, string code, string expected, bool ready)[] KeepSeriesCases =
+    {
+        ("K1", "H74H-16P DN50", "H74H-16P DN50", true),          // серия — окончание сохранено, DN50 не мешает «* *»
+        ("K2", "Клапан H74H-16P DN50", "H74H-16P DN50", true),   // значащее слово: классификатор правила 12 не применяется
+        ("K3", "Н74Н-16Р DN50", "H74H-16P DN50", true),          // серия кириллицей: буквы заменены правилом 10
+        ("K4", "H75H-16P DN50", "H75H-16P", true),               // другая серия — окончание удаляется
+        ("K5", "Крышка насоса H74H-16P DN50", "", false),        // связь через род. п. действует и для серий
+        ("K6", "Клапан H75H-16P DN50", "H75H-16P", false),       // не серия — классификатор отправляет на ручную проверку
     };
 
     public static string Run(ProcessOptions opts)
@@ -121,11 +141,13 @@ public static class SelfTest
         var sb = new StringBuilder();
         int ok = 0, total = 0;
 
-        void RunSet(string title, IEnumerable<(string a, string c, string exp)> set, ProcessOptions o)
+        void RunSet(string title,
+                    IEnumerable<(string a, string c, string exp, bool? ready)> set,
+                    ProcessOptions o)
         {
             int setOk = 0, setTotal = 0;
             var block = new StringBuilder();
-            foreach (var (a, c, exp) in set)
+            foreach (var (a, c, exp, ready) in set)
             {
                 setTotal++;
                 string actual;
@@ -135,15 +157,22 @@ public static class SelfTest
                     var res = CodeProcessor.Process(a, c, o);
                     actual = res.Result;
                     pass = actual == exp;
+                    if (ready.HasValue)
+                    {
+                        actual += res.ReadyFor1C ? " [1С]" : " [ручная]";
+                        pass &= res.ReadyFor1C == ready.Value;
+                    }
                 }
                 catch (Exception ex)
                 {
                     actual = "ИСКЛЮЧЕНИЕ: " + ex.Message;
                     pass = false;
                 }
+
+                string expText = exp + (ready.HasValue ? (ready.Value ? " [1С]" : " [ручная]") : "");
                 if (pass) setOk++;
                 block.AppendLine($"{(pass ? "OK  " : "FAIL")} «{c}» -> «{actual}»" +
-                                 (pass ? "" : $" (ожидалось «{exp}»)"));
+                                 (pass ? "" : $" (ожидалось «{expText}»)"));
             }
             sb.AppendLine($"--- {title}: {setOk} из {setTotal} ---");
             sb.Append(block);
@@ -152,18 +181,29 @@ public static class SelfTest
             total += setTotal;
         }
 
-        RunSet("Правила 1–11 (правило 12 выключено)", Cases, WithRule12(opts, false));
-        RunSet("Правило 12", Rule12Cases, WithRule12(opts, true));
+        RunSet("Правила 1–11 (правило 12 выключено)",
+               Cases.Select(x => (x.article, x.code, x.expected, (bool?)null)),
+               With(opts, rule12: false));
+        RunSet("Правило 12",
+               Rule12Cases.Select(x => (x.article, x.code, x.expected, (bool?)null)),
+               With(opts, rule12: true));
+        RunSet($"Серии без удаления окончаний («{KeepSeriesTest}», доп. символ «{KeepSeriesExtra}»)",
+               KeepSeriesCases.Select(x => (x.article, x.code, x.expected, (bool?)x.ready)),
+               With(opts, rule12: true, keepSeries: KeepSeriesTest, extra1C: KeepSeriesExtra));
 
         sb.Insert(0, $"Пройдено {ok} из {total}{Environment.NewLine}{Environment.NewLine}");
         return sb.ToString();
     }
 
-    /// <summary>Копия опций с принудительно включённым или выключенным правилом 12.</summary>
-    private static ProcessOptions WithRule12(ProcessOptions o, bool on)
+    /// <summary>
+    /// Копия опций с принудительно включённым или выключенным правилом 12.
+    /// keepSeries / extra1C — замена соответствующих настроек (null — как в исходных опциях).
+    /// </summary>
+    private static ProcessOptions With(ProcessOptions o, bool rule12,
+                                       string? keepSeries = null, string? extra1C = null)
     {
         var enabled = new HashSet<RuleId>(o.Enabled);
-        if (on) enabled.Add(RuleId.CatalogStartReview);
+        if (rule12) enabled.Add(RuleId.CatalogStartReview);
         else enabled.Remove(RuleId.CatalogStartReview);
 
         return new ProcessOptions
@@ -171,8 +211,9 @@ public static class SelfTest
             Enabled = enabled,
             RequireWholeToken = o.RequireWholeToken,
             MaxEndingIterations = o.MaxEndingIterations,
-            Extra1CChars = o.Extra1CChars,
+            Extra1CChars = extra1C ?? o.Extra1CChars,
             CyrillicExceptions = o.CyrillicExceptions,
+            EndingKeepSeries = keepSeries ?? o.EndingKeepSeries,
             AllowEmptyingByEnding = o.AllowEmptyingByEnding,
             EndingMustBeOriginal = o.EndingMustBeOriginal,
         };

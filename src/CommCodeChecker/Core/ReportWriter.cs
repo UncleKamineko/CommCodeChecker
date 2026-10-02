@@ -1,4 +1,4 @@
-﻿using System.Text;
+﻿    using System.Text;
 
 namespace CommCodeChecker.Core;
 
@@ -27,7 +27,7 @@ public static class ReportWriter
             lines.Add(("СБОЕВ ОБРАБОТКИ:", r.Failures.ToString()));
 
         if (r.Duplicates1C > 0)
-            lines.Add(("ДУБЛИКАТОВ КОДА (1С):", r.Duplicates1C.ToString()));
+            lines.Add(("ДУБЛИКАТОВ КОДА (исключены из 1С):", r.Duplicates1C.ToString()));
         if (r.DuplicatesManual > 0)
             lines.Add(("ДУБЛИКАТОВ КОДА (ручная проверка):", r.DuplicatesManual.ToString()));
 
@@ -69,10 +69,12 @@ public static class ReportWriter
             sb.AppendLine("ДУБЛИКАТЫ КОММ. КОДОВ");
             sb.AppendLine(new string('-', cols));
             foreach (var f in dupFiles)
-                sb.AppendLine($"  ВНИМАНИЕ!!! В файле {f} обнаружены дубликаты " +
-                              "комм. кодов для разных артикулов, проверьте!");
-            sb.AppendLine();
-            sb.AppendLine("  Артикулы таких строк выделены красным полужирным шрифтом.");
+                sb.AppendLine("  " + BatchProcessor.DuplicateWarning(f));
+            if (r.DuplicatesManual > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine($"  В файле {BatchProcessor.FileManual} артикулы таких строк выделены красным полужирным шрифтом.");
+            }
         }
 
         // Состав включённых правил: иначе счётчик 0 неотличим от «правило отключено».
@@ -100,6 +102,7 @@ public static class ReportWriter
         sb.AppendLine("  " + BatchProcessor.File1C);
         sb.AppendLine("  " + BatchProcessor.FileManual);
         sb.AppendLine("  " + BatchProcessor.FileNoChange);
+        if (r.Duplicates1C > 0) sb.AppendLine("  " + BatchProcessor.FileDuplicates1C);
         sb.AppendLine("  " + FileName + "   (этот файл)");
 
         return sb.ToString();
