@@ -184,7 +184,7 @@ public sealed class BatchTab : UserControl
         if (files.Count == 0)
         {
             _dupWarn.Visible = false;
-            _dupWarn.Text = "";
+            _dupWarn.Text = string.Join(Environment.NewLine, files.Select(BatchProcessor.DuplicateWarning));
             return;
         }
 

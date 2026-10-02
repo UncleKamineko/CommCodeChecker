@@ -70,7 +70,16 @@ public sealed class AnalysisSettingsTab : UserControl
     };
     /// <summary>Базовая высота поля (одна строка текста) — вычисляется при первом показе.</summary>
     private int _cyrExceptionsBaseH;
-
+    // Поле «Серии, для которых не удаляем окончания» (правило 8).
+    // Высота подстраивается под содержимое, минимум — одна строка.
+    private readonly TextBox _keepSeries = new()
+    {
+        Multiline = true,
+        WordWrap = true,
+        ScrollBars = ScrollBars.None,
+        Width = 350,
+        MinimumSize = new Size(350, 0)
+    };
     private readonly Label _lblWords = new() { AutoSize = true, Margin = new Padding(8, 7, 0, 0) };
     private readonly Label _lblEndings = new() { AutoSize = true, Margin = new Padding(8, 7, 0, 0) };
     private readonly Label _lblExcl = new() { AutoSize = true, Margin = new Padding(8, 7, 0, 0) };
@@ -284,7 +293,37 @@ public sealed class AnalysisSettingsTab : UserControl
             Margin = new Padding(8, 6, 0, 0)
         });
         extra.Controls.Add(rowCyrExc);
-
+        // --- строка «Серии, для которых не удаляем окончания» (правило 8) ---
+        var rowKeepSeries = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            WrapContents = false,
+            Margin = new Padding(12, 4, 0, 0)
+        };
+        rowKeepSeries.Controls.Add(new Label
+        {
+            Text = "Серии, для которых не удаляем окончания:",
+            AutoSize = true,
+            Margin = new Padding(0, 6, 8, 0)
+        });
+        _keepSeries.TextChanged += (_, __) =>
+        {
+            MarkDirty();
+            AdjustAutoHeight(_keepSeries);
+        };
+        _keepSeries.Resize += (_, __) => AdjustAutoHeight(_keepSeries);
+        _keepSeries.FontChanged += (_, __) => AdjustAutoHeight(_keepSeries);
+        rowKeepSeries.Controls.Add(_keepSeries);
+        rowKeepSeries.Controls.Add(new Label
+        {
+            Text = "Перечислите серии номенклатуры, для которых необходимо сохранить окончания, " +
+                   "например H74H для сохранения полного кода H74H-16P DN50",
+            AutoSize = true,
+            MaximumSize = new Size(360, 0),   // длинная подсказка переносится, а не раздвигает вкладку
+            ForeColor = Color.DimGray,
+            Margin = new Padding(8, 6, 0, 0)
+        });
+        extra.Controls.Add(rowKeepSeries);
         var host = new FlowLayoutPanel
         {
             FlowDirection = FlowDirection.TopDown,
@@ -532,6 +571,7 @@ public sealed class AnalysisSettingsTab : UserControl
         s.ForceDeleteWordsFilePath = string.IsNullOrWhiteSpace(_forceDel) ? null : _forceDel;
         s.Extra1CChars = _extra1C.Text ?? "";
         s.CyrillicExceptions = _cyrExceptions.Text ?? "";
+        s.EndingKeepSeries = _keepSeries.Text ?? "";
         s.Save();
 
         _main.ReloadConfiguration();
@@ -564,6 +604,7 @@ public sealed class AnalysisSettingsTab : UserControl
             _forceDel = s.ForceDeleteWordsFilePath;
             _extra1C.Text = s.Extra1CChars ?? "";
             _cyrExceptions.Text = s.CyrillicExceptions ?? "";
+            _keepSeries.Text = s.EndingKeepSeries ?? "";
         }
         finally { _suppress = false; }
 
@@ -598,7 +639,20 @@ public sealed class AnalysisSettingsTab : UserControl
         if (_cyrExceptions.Height != newH)
             _cyrExceptions.Height = newH;
     }
+    /// Подгоняет высоту многострочного поля под число визуальных строк, минимум — одна строка.
+    private static void AdjustAutoHeight(TextBox box)
+    {
+        if (box.Width <= 0) return;
 
+        int baseH = box.Font.Height + 8;   // 8 px — внутренние отступы TextBox
+        string probe = string.IsNullOrEmpty(box.Text) ? "X" : box.Text;
+        int w = box.ClientSize.Width > 4 ? box.ClientSize.Width - 4 : box.Width;
+        var sz = TextRenderer.MeasureText(probe, box.Font, new Size(w, int.MaxValue),
+            TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl);
+
+        int newH = Math.Max(baseH, sz.Height + 8);
+        if (box.Height != newH) box.Height = newH;
+    }
     // ================= шрифты =================
     /// <summary>
     /// ИЗМЕНЕНО: _rulesText больше не в KeepFamily — текст правил получает
