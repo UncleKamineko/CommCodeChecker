@@ -177,19 +177,16 @@ public sealed class BatchTab : UserControl
         }
         finally { _btnLoad.Enabled = true; }
     }
-
-    private void ShowDuplicateWarning(BatchReport report)
+        private void ShowDuplicateWarning(BatchReport report)
     {
         var files = report.FilesWithDuplicates.ToList();
         if (files.Count == 0)
         {
             _dupWarn.Visible = false;
-            _dupWarn.Text = string.Join(Environment.NewLine, files.Select(BatchProcessor.DuplicateWarning));
             return;
         }
 
-        _dupWarn.Text = string.Join(Environment.NewLine, files.Select(f =>
-            $"ВНИМАНИЕ!!! В файле {f} обнаружены дубликаты комм. кодов для разных артикулов, проверьте!"));
+        _dupWarn.Text = string.Join(Environment.NewLine, files.Select(BatchProcessor.DuplicateWarning));
         _dupWarn.Visible = true;
     }
 
