@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using System.Text.RegularExpressions;
 using ClosedXML.Excel;
 
@@ -21,6 +21,9 @@ public sealed class ConfigRepository
     public static string DefaultForceDeleteWordsPath =>
         Path.Combine(DefaultConfigFolder, "Слова удаления кода.txt");
         public string CharMapPath { get; private set; } = DefaultCharMapPath;
+    /// Слова, которые не считаются зависимым существительным в род. п. (правило 12).
+    public static string DefaultGenitiveExceptionsPath =>
+        Path.Combine(DefaultConfigFolder, "Исключения родительного падежа.txt");
     public CharReplacements CharMap { get; private set; } = new();
     public static string DefaultImRulesPath =>
         Path.Combine(DefaultConfigFolder, ImRuleSet.CodeFileName);
@@ -53,6 +56,11 @@ public sealed class ConfigRepository
     public bool IsForceDeleteWord(string token) =>
         !string.IsNullOrEmpty(token) && _forceDeleteWords.Contains(token.Trim());
 
+    private HashSet<string> _genitiveExceptions = new(StringComparer.OrdinalIgnoreCase);
+
+    /// Слово не считается зависимым существительным в род. п.
+    public bool IsGenitiveException(string token) =>
+        !string.IsNullOrEmpty(token) && _genitiveExceptions.Contains(token.Trim());
     public bool IsExcludedArticle(string article)
     {
         if (string.IsNullOrWhiteSpace(article)) return false;
@@ -73,6 +81,7 @@ public sealed class ConfigRepository
         LoadEndings();
         LoadExclusions();
         LoadForceDeleteWords();
+        LoadGenitiveExceptions();
         if (File.Exists(DefaultRulesTextPath))
         {
             try { RulesText = string.Join(Environment.NewLine, ReadLinesSmart(DefaultRulesTextPath)); }
@@ -153,7 +162,8 @@ public sealed class ConfigRepository
         _forceDeleteWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (!File.Exists(ForceDeleteWordsPath))
         {
-            LoadWarnings.Add("Файл «Слова удаления кода.txt» не найден.");
+            LoadWarnings.Add("Файл «Слова удаления кода.txt» не найден — используется встроенный список.");
+            foreach (var w in DefaultForceDeleteWordsList()) _forceDeleteWords.Add(w);
             return;
         }
         try
@@ -171,6 +181,35 @@ public sealed class ConfigRepository
         catch (Exception ex) { LoadWarnings.Add("Слова удаления кода: " + ex.Message); }
     }
 
+    /// <summary>
+    /// Исключения родительного падежа: слова в род. п., не означающие другое изделие
+    /// («Датчик давления», «Фильтр тонкой очистки»). Чтение с четвёртой строки.
+    /// Если файла нет — встроенный список.
+    /// </summary>
+    private void LoadGenitiveExceptions()
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            if (File.Exists(DefaultGenitiveExceptionsPath))
+            {
+                var lines = ReadLinesSmart(DefaultGenitiveExceptionsPath);
+                for (int i = 3; i < lines.Length; i++)
+                {
+                    string v = lines[i].Trim();
+                    if (v.Length == 0 || IsServiceLine(v)) continue;
+                    set.Add(v);
+                }
+            }
+            else
+            {
+                LoadWarnings.Add("Файл «Исключения родительного падежа.txt» не найден — используется встроенный список.");
+                foreach (var w in DefaultGenitiveExceptionsList()) set.Add(w);
+            }
+        }
+        catch (Exception ex) { LoadWarnings.Add("Исключения родительного падежа: " + ex.Message); }
+        _genitiveExceptions = set;   // замена целиком, без очистки «на месте»
+    }
     private void AddSheet(XLWorkbook wb, string name, Func<string, string> wrap)
     {
         IXLWorksheet? ws = wb.Worksheets.FirstOrDefault(
@@ -237,6 +276,11 @@ public sealed class ConfigRepository
                 "Слова, при наличии которых в начале коммерческого кода он полностью удаляется",
                 "Правила добавления слов: по одному значению в строке, без пробелов в начале и в конце",
                 DefaultForceDeleteWordsList());
+        if (!File.Exists(DefaultGenitiveExceptionsPath))
+            WriteTxt(DefaultGenitiveExceptionsPath,
+                "Слова в родительном падеже, которые не указывают на связь позиции с другим изделием (правило 12)",
+                "Правила добавления слов: по одному значению в строке, в той форме, как в коде (давления, очистки), без пробелов в начале и в конце",
+                DefaultGenitiveExceptionsList());
 
         if (!File.Exists(DefaultRulesTextPath))
             File.WriteAllText(DefaultRulesTextPath, RuleCatalog.FallbackRulesText, new UTF8Encoding(true));
@@ -269,9 +313,25 @@ public sealed class ConfigRepository
     /// <summary>Слова безусловного удаления кода — первичное наполнение файла.</summary>
     public static string[] DefaultForceDeleteWordsList() => new[]
     {
-        "конденсатор", "болт", "винт", "шайба", "гайка", "саморез", "шуруп", "хомут"
+    "корпус", "конденсатор", "провод", "болт", "винт",
+    "шайба", "гайка", "саморез", "шуруп", "хомут"
+};
+    /// Исключения родительного падежа — первичное наполнение файла.
+    public static string[] DefaultGenitiveExceptionsList() => new[]
+    {
+        // измеряемые величины и параметры
+        "температуры", "уровня", "расхода", "хода", "тока", "мощности", "скорости",
+        "времени", "нагрузки", "вакуума", "диаметра", "размера", "длины", "ширины",
+        "высоты", "толщины", "класса", "типа", "вида", "серии", "модели", "марки",
+        "цвета", "формы", "качества", "точности", "резьбы",
+        // назначение
+        "очистки", "защиты", "подачи", "сброса", "смазки", "поставки",
+        // среды
+        "воздуха", "воды", "масла", "газа", "топлива", "пара", "жидкости", "среды",
+        // материалы
+        "стали", "латуни", "меди", "бронзы", "чугуна", "алюминия", "резины",
+        "пластика", "металла"
     };
-
     public static string[] DefaultWordsList() => DefaultWordsBlob
         .Split(new[] { ' ', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
 
