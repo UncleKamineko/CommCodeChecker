@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -312,8 +312,31 @@ public static class CodeProcessor
         "and", "with", "for", "of", "per", "the", "a", "an", "to", "in", "on", "by", "or",
         "from", "at", "as", "is", "are", "be", "no", "not"
     };
+    // ---------- правило 12: зависимая конструкция в родительном падеже ----------
+    // «Крышка насоса», «Ремкомплект распределителя», «Шток поршня»: позиция связана
+    // с другим изделием — код после такой конструкции относится к нему, а не к позиции.
 
+    /// Прилагательные в им. п. и жен. род. п. («-ой», «-ей» у «тонкой», «верхней»
+    /// не учитываются: «-ей» у существительных — род. п. мн. ч., см. NounGenitiveEndings).
+    private static readonly string[] AdjSkipEndings =
+        { "ого", "его", "ых", "их", "ый", "ий", "ой", "ая", "яя", "ое", "ее", "ые", "ие" };
 
+    /// Окончания существительных в род. п. ед. и мн. ч.
+    private static readonly string[] NounGenitiveEndings =
+        { "ов", "ев", "ёв", "ей", "а", "я", "ы", "и" };
+
+    private static readonly Regex CyrWordRx = new(
+        @"^[А-Яа-яЁё]+(?:-[А-Яа-яЁё]+)*$", RegexOptions.Compiled);
+
+    private const int GenitiveScanLimit = 4;
+        /// Слова-«наборы»: следующее за ними слово — содержимое набора
+    /// («Комплект прокладок», «Набор ключей»), а не связь с другим изделием.
+    /// Ремкомплект сюда не входит: «Ремкомплект распределителя» — связь с изделием.
+    private static readonly HashSet<string> CollectiveHeads = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "комплект", "комплекты", "набор", "наборы",
+        "упаковка", "упаковки", "пачка", "пачки", "партия"
+    };
     private static readonly Regex CodeLikeRx = new(@"^[0-9A-Z][0-9A-Zx\-.,/°""']*$", RegexOptions.Compiled);
     private static readonly Regex SuspiciousRx = new(
         @"(\b(DIN|ISO|GOST|ANSI|JIS|EN)\s?\d)|(\bГОСТ)|(\bDN\s?\d)|(\bДу\s?\d)|(^|\s)M\d+X\d|" +
@@ -449,7 +472,10 @@ public static class CodeProcessor
             }
             else
             {
-                // … без изменений …
+                var review = ClassifyCatalogStart(res.Original, res.Result, cfg, startsWithSignificantWord);
+                res.CatalogReviewWithResult = review == CatalogReviewKind.WithResult;
+                res.CatalogReviewEmpty = review == CatalogReviewKind.Empty;
+                if (review != CatalogReviewKind.None) applied.Add(RuleId.CatalogStartReview);
             }
         }
         res.Highlight = new HashSet<int>(t.TouchedOriginalIndexes);
@@ -542,8 +568,13 @@ public static class CodeProcessor
 
         string source = original.Trim();
         string rest = result.Trim();
-        if (CatalogMarkerRx.IsMatch(source) || HasPrepositionLink(source)) return
-            HasPrepositionLink(source) ? CatalogReviewKind.Empty : CatalogReviewKind.WithResult;
+
+        // Связь позиции с другим изделием — через предлог («Уплотнения для заслонки»)
+        // или через зависимое слово в род. п. («Крышка насоса»): код удаляется.
+        if (HasPrepositionLink(source) || HasGenitiveLink(source, cfg))
+            return CatalogReviewKind.Empty;
+        if (CatalogMarkerRx.IsMatch(source))
+            return CatalogReviewKind.WithResult;
 
         if (string.IsNullOrEmpty(rest)) return CatalogReviewKind.Empty;
         var tokens = TokenSpans(rest).Select(x => rest.Substring(x.start, x.len).Trim(EdgeTrim))
@@ -582,6 +613,49 @@ public static class CodeProcessor
     private static bool HasPrepositionLink(string value) =>
         Regex.IsMatch(value, @"(?:^|\s)(?:для|от|for|of|per|к|ко|с|со|на|в|во|из|по|with)\s+[A-ZА-ЯЁ0-9ØΦ]",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    /// <summary>
+    /// После первого (значащего) слова идёт зависимое существительное в род. п.:
+    /// «Крышка насоса», «Ремкомплект распределителя», «Комплект уплотнений клапана».
+    /// Прилагательные, отглагольные существительные (-ния/-тия) и слова из файла
+    /// «Исключения родительного падежа.txt» пропускаются; просмотр прекращается
+    /// на коде, союзе, аббревиатуре или после запятой (перечисление).
+    /// Если первое слово — набор («Комплект», «Набор»), следующее слово считается
+    /// содержимым набора и пропускается: «Комплект прокладок AB12» не удаляется.
+    /// </summary>
+    private static bool HasGenitiveLink(string value, ConfigRepository cfg)
+    {
+        var spans = TokenSpans(value);
+        if (spans.Count < 2) return false;
+
+        string head = value.Substring(spans[0].start, spans[0].len).Trim(EdgeTrim);
+        bool collective = CollectiveHeads.Contains(head);
+        int limit = GenitiveScanLimit + (collective ? 1 : 0);
+
+        for (int k = 1; k < spans.Count && k <= limit; k++)
+        {
+            string prevRaw = value.Substring(spans[k - 1].start, spans[k - 1].len);
+            if (prevRaw.EndsWith(',') || prevRaw.EndsWith(';')) break;   // перечисление
+
+            string w = value.Substring(spans[k].start, spans[k].len).Trim(EdgeTrim);
+            if (!CyrWordRx.IsMatch(w)) break;                            // код, число, латиница
+            if (OrphanedWords.Contains(w)) break;                        // союз/служебное слово
+            if (w.Length <= 4 && w == w.ToUpperInvariant()) break;       // аббревиатура: ПВА, ФУМ
+
+            if (collective && k == 1) continue;                          // содержимое набора
+
+            if (IsGenitiveDependentNoun(w.ToLowerInvariant(), cfg)) return true;
+        }
+        return false;
+    }
+        private static bool IsGenitiveDependentNoun(string w, ConfigRepository cfg)
+    {
+        if (w.Length < 4) return false;
+        if (cfg.IsGenitiveException(w)) return false;
+        if (AdjSkipEndings.Any(e => w.EndsWith(e, StringComparison.Ordinal))) return false;
+        if (w.EndsWith("ния", StringComparison.Ordinal) ||
+            w.EndsWith("тия", StringComparison.Ordinal)) return false;  // давления, крепления
+        return NounGenitiveEndings.Any(e => w.EndsWith(e, StringComparison.Ordinal));
+    }
 
     /// <summary>
     /// Начинается ли значение со значащего слова (по состоянию ДО правила 7).
@@ -1003,49 +1077,16 @@ public static class CodeProcessor
                 }
             }
         }
-
         bool changed = false;
 
         // Обход с конца: замена 1 символа на N не сдвигает индексы левее текущего.
+        // Кириллическая «М» заменяется по общей карте, как остальные буквы:
+        // обозначения М004/М0… защищает правило 5 (ThreadRx), здесь отдельной проверки нет.
         for (int i = v.Length - 1; i >= 0; i--)
         {
             if (protectedIdx.Contains(i)) continue;
             if (!map.TryMap(v[i], out string repl)) continue;
-            if (repl.Length == 1 && repl[0] == v[i]) continue;   // замена на себя же
-
-            for (int i = v.Length - 1; i >= 0; i--)
-            {
-                if (protectedIdx.Contains(i)) continue;
-                if (!map.TryMap(v[i], out string repl)) continue;
-                if (repl.Length == 1 && repl[0] == v[i]) continue; // замена на себя же
-
-                t.Replace(i, 1, repl);
-                changed = true;
-            }
-            {
-                // Слева допускается начало строки, пробел, дефис или минус:
-                // резьба может стоять после разделителя (переходник-М0,5, -М12).
-                // Дефис не создаёт ложных срабатываний на составных кодах вида
-                // КЭМ-М004-РФ01 — их отсекает проверка дроби ниже.
-                bool leftOk = i == 0
-                    || v[i - 1] == ' ' || v[i - 1] == '\t'
-                    || v[i - 1] == '-' || Array.IndexOf(DashSources, v[i - 1]) >= 0;
-                if (!leftOk) continue;
-
-                // Справа должна быть цифра.
-                if (i + 1 >= v.Length || !char.IsDigit(v[i + 1])) continue;
-
-                // Особый случай: обозначения вида М0... (М, затем 0) считаем резьбой
-                // только при наличии десятичной дроби — запятая или точка: М0,5.
-                // Артикулы вида М004, М008 без дроби резьбой не являются.
-                // Остальные обозначения (М12, М10x1.5 и подобные) обрабатываются по прежней логике.
-                if (v[i + 1] == '0')
-                {
-                    // Запятая или точка должна стоять сразу после «М0»: М0,5
-                    bool hasDecimal = (i + 2 < v.Length) && (v[i + 2] == ',' || v[i + 2] == '.');
-                    if (!hasDecimal) continue;
-                }
-            }
+            if (repl.Length == 1 && repl[0] == v[i]) continue; // замена на себя же
 
             t.Replace(i, 1, repl);
             changed = true;
